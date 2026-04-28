@@ -3,43 +3,27 @@ import math
 import datetime
 import os
 
-# ================= 配置区 =================
-ALERT_THRESHOLD = 2.0  # 建议先设为 2.0 方便测试，测试成功收到微信后再改回 1.2
-# =========================================
-
 def get_btc_klines():
-    # 备用 API 列表。优先使用 binance.us，因为 GitHub 服务器多在美国
     api_urls = [
         "https://api.binance.us/api/v3/klines",
         "https://api.binance.com/api/v3/klines",
         "https://api1.binance.com/api/v3/klines"
     ]
     params = {"symbol": "BTCUSDT", "interval": "1d", "limit": 200}
-
     for url in api_urls:
         try:
-            print(f"正在尝试请求接口: {url}")
             response = requests.get(url, params=params, timeout=10).json()
-            # 检查返回的是否是正常的数据列表
             if isinstance(response, list) and len(response) == 200:
-                print("✅ 成功获取行情数据！")
                 return response
-            else:
-                print(f"⚠️ 接口返回异常数据: {response}")
-        except Exception as e:
-            print(f"❌ 接口请求失败: {e}")
+        except Exception:
             continue
-            
     return None
 
 def calculate_ahr999():
     try:
         klines = get_btc_klines()
-        if not klines:
-            print("所有行情接口均无法访问，计算终止。")
-            return None, None
+        if not klines: return None, None
 
-        # 提取每天的收盘价
         closes = [float(day[4]) for day in klines]
         current_price = closes[-1]
         ma_200 = sum(closes) / len(closes)
@@ -49,33 +33,56 @@ def calculate_ahr999():
         days_since_genesis = (today - genesis_date).days
 
         exp_val = 10 ** (5.84 * math.log10(days_since_genesis) - 17.01)
-
         ahr999 = (current_price / ma_200) * (current_price / exp_val)
-        
         return ahr999, current_price
     except Exception as e:
-        print(f"计算过程发生异常: {e}")
+        print(f"AHR999计算异常: {e}")
         return None, None
 
-def send_wxpusher_notification(ahr999, price):
+def get_fear_greed_index():
+    # 使用 Alternative.me 免费公开 API
+    try:
+        url = "https://api.alternative.me/fng/"
+        response = requests.get(url, timeout=10).json()
+        data = response['data'][0]
+        value = int(data['value'])
+        classification = data['value_classification']
+        
+        # 将英文状态翻译为中文
+        trans = {
+            "Extreme Fear": "极度恐惧 🥶",
+            "Fear": "恐惧 😨",
+            "Neutral": "中立 😐",
+            "Greed": "贪婪 😏",
+            "Extreme Greed": "极度贪婪 🤑"
+        }
+        return value, trans.get(classification, classification)
+    except Exception as e:
+        print(f"恐惧贪婪指数获取失败: {e}")
+        return "未知", "未知"
+
+def send_wxpusher_notification(ahr999, price, fgi_value, fgi_class, zone_type):
     app_token = os.environ.get("WXPUSHER_APP_TOKEN")
     uid = os.environ.get("WXPUSHER_UID")
-    
-    if not app_token or not uid:
-        print("未配置 WxPusher 的 Token 或 UID，无法发送通知。")
-        return
+    if not app_token or not uid: return
 
-    if ahr999 < 0.45:
-        advice = "🚨 属于【抄底区间】，极其罕见的买入机会！"
+    # 根据区间设置不同的文案和颜色
+    if zone_type == "bottom":
+        title = "🚨 AHR999 极度低估 (抄底预警)"
+        advice = "目前处于【0.45以下】的极度低估区间，历史罕见，建议果断买入！"
+        ahr_color = "#00b050" # 绿色
     else:
-        advice = "💰 属于【定投区间】，适合分批买入！"
+        title = "🔥 AHR999 估值偏高 (风险预警)"
+        advice = "目前处于【1.2以上】的高估区间，定投应暂停，可考虑逢高分批减仓！"
+        ahr_color = "#ff0000" # 红色
 
     content = f"""
-    <h2>⚠️ AHR999 指标触发提醒</h2>
-    <p><b>当前 AHR999 指数:</b> <span style="color:red; font-size:22px;">{ahr999:.4f}</span></p>
+    <h2>{title}</h2>
+    <p><b>当前 AHR999 指数:</b> <span style="color:{ahr_color}; font-size:24px; font-weight:bold;">{ahr999:.4f}</span></p>
     <p><b>当前 BTC 价格:</b> $ {price:.2f}</p>
-    <p><b>操作建议:</b> {advice}</p>
     <hr>
+    <p><b>恐惧贪婪指数:</b> <span style="font-size:20px; font-weight:bold;">{fgi_value}</span> ({fgi_class})</p>
+    <p><b>操作建议:</b> {advice}</p>
     <p><i>时间: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</i></p>
     """
     
@@ -83,24 +90,27 @@ def send_wxpusher_notification(ahr999, price):
     data = {
         "appToken": app_token,
         "content": content,
-        "summary": f"AHR999提醒: 当前指数 {ahr999:.4f}",
+        "summary": f"市场异动: AHR999={ahr999:.2f}, 贪婪指数={fgi_value}",
         "contentType": 2, 
         "uids": [uid]
     }
-    
-    response = requests.post(url, json=data).json()
-    if response.get("code") == 1000:
-        print("✅ WxPusher 微信通知发送成功！")
-    else:
-        print(f"❌ 微信通知发送失败: {response}")
+    requests.post(url, json=data)
+    print("微信通知已发送！")
 
 if __name__ == "__main__":
+    print("开始获取数据...")
     ahr999, current_price = calculate_ahr999()
+    fgi_value, fgi_class = get_fear_greed_index()
     
     if ahr999 is not None:
-        print(f"👉 当前 AHR999: {ahr999:.4f}, 当前价格: $ {current_price:.2f}")
-        if ahr999 <= ALERT_THRESHOLD:
-            print("达到阈值，准备发送微信通知...")
-            send_wxpusher_notification(ahr999, current_price)
+        print(f"👉 AHR999: {ahr999:.4f} | 价格: ${current_price:.2f} | 恐惧贪婪: {fgi_value}({fgi_class})")
+        
+        # 核心逻辑：小于0.45 或 大于1.2 才触发通知
+        if ahr999 < 0.45:
+            print("触发【抄底】条件，发送通知...")
+            send_wxpusher_notification(ahr999, current_price, fgi_value, fgi_class, "bottom")
+        elif ahr999 > 1.2:
+            print("触发【高估】条件，发送通知...")
+            send_wxpusher_notification(ahr999, current_price, fgi_value, fgi_class, "top")
         else:
-            print(f"未达到提醒阈值 (<= {ALERT_THRESHOLD})，暂不通知。")
+            print("当前指标在 0.45 ~ 1.2 之间（常规区间），不发送通知。")
