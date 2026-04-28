@@ -2,9 +2,8 @@ name: AHR999 Monitor Daily
 
 on:
   schedule:
-    # 每天北京时间早上 8:00 执行 (UTC时间 0:00)
     - cron: '0 0 * * *'
-  workflow_dispatch: # 允许手动点击运行，方便测试
+  workflow_dispatch:
 
 jobs:
   run-script:
@@ -23,5 +22,6 @@ jobs:
 
       - name: Run AHR999 Script
         env:
-          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
+          WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
         run: python main.py
