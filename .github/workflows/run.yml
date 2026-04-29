@@ -1,8 +1,9 @@
-name: AHR999 Monitor Daily
+name: AHR999 Macro Monitor
 
 on:
   schedule:
-    - cron: '55,01 * * * *'
+    # 每天北京时间早上 8:17 执行一次 (UTC时间 0:17)
+    - cron: '17 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -10,10 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4  # 消除弃用警告
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5  # 消除弃用警告
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
