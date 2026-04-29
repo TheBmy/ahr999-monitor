@@ -2,7 +2,7 @@ name: AHR999 Monitor Daily
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '55,01 * * * *'
   workflow_dispatch:
 
 jobs:
