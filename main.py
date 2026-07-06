@@ -13,6 +13,7 @@ AHR999_DEEP = 0.3        # 深底：极度低估二级预警线
 ESCAPE_AHR999 = 1.5      # 逃顶条件 A：Ahr999 > 1.5
 ESCAPE_FGI = 85          # 逃顶条件 C：贪婪指数 >= 85 (极度疯狂泡沫)
 # ==========================================
+PI_BOTTOM_THRESHOLD = 1.0  # Pi Cycle Bottom 底部信号阈值: 150EMA / (471SMA * 0.745) <= 1.0
 STATE_FILE = "state.json"
 
 def load_state():
@@ -21,7 +22,7 @@ def load_state():
         with open(STATE_FILE, "r") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"last_ahr999": None}
+        return {"last_ahr999": None, "last_pi_bottom": None}
 
 def save_state(state):
     """保存运行状态"""
@@ -29,7 +30,7 @@ def save_state(state):
         json.dump(state, f)
 
 def get_btc_data():
-    """获取过去400天的K线(用于Pi周期) 和 24小时涨跌幅"""
+    """获取过去500天的K线(用于Pi周期) 和 24小时涨跌幅"""
     kline_urls = ["https://api.binance.us/api/v3/klines", "https://api.binance.com/api/v3/klines"]
     ticker_urls = ["https://api.binance.us/api/v3/ticker/24hr", "https://api.binance.com/api/v3/ticker/24hr"]
 
@@ -38,8 +39,8 @@ def get_btc_data():
     # 获取 400 天 K线
     for url in kline_urls:
         try:
-            res = requests.get(url, params={"symbol": "BTCUSDT", "interval": "1d", "limit": 400}, timeout=10).json()
-            if isinstance(res, list) and len(res) >= 350:
+            res = requests.get(url, params={"symbol": "BTCUSDT", "interval": "1d", "limit": 500}, timeout=10).json()
+            if isinstance(res, list) and len(res) >= 471:
                 klines = res
                 break
         except: continue
@@ -73,10 +74,25 @@ def calculate_indicators(klines):
         # 2. 计算 Pi 周期交叉率 (当值 >= 1.0 时，说明111日线向上击穿了350日线*2，逃顶条件 B 触发)
         pi_cross_ratio = ma_111 / (ma_350 * 2)
 
-        return ahr999, pi_cross_ratio, current_price
+        # 3. 计算 Pi Cycle Bottom: 150EMA / (471SMA * 0.745), <= 1.0 为底部信号
+        ema_150 = calc_ema(closes, 150)
+        ma_471 = sum(closes[-471:]) / 471
+        pi_bottom_ratio = ema_150 / (ma_471 * 0.745)
+
+        return ahr999, pi_cross_ratio, current_price, pi_bottom_ratio
     except Exception as e:
         print(f"指标计算异常: {e}")
-        return None, None, None
+        return None, None, None, None
+
+def calc_ema(closes, period):
+    """计算指数移动平均 (Exponential Moving Average)"""
+    if len(closes) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = sum(closes[:period]) / period  # 初始值用 SMA
+    for price in closes[period:]:
+        ema = price * k + ema * (1 - k)
+    return ema
 
 def get_fear_greed_index():
     try:
@@ -141,7 +157,7 @@ if __name__ == "__main__":
     klines, change_pct = get_btc_data()
     if not klines: exit()
 
-    ahr999, pi_ratio, current_price = calculate_indicators(klines)
+    ahr999, pi_ratio, current_price, pi_bottom_ratio = calculate_indicators(klines)
     fgi_value, fgi_class = get_fear_greed_index()
 
     if ahr999 is None: exit()
@@ -149,14 +165,49 @@ if __name__ == "__main__":
     # 加载上次状态
     state = load_state()
     last_ahr999 = state.get("last_ahr999")
+    last_pi_bottom = state.get("last_pi_bottom")
 
-    print(f"👉 AHR999: {ahr999:.4f} | Pi率: {pi_ratio:.4f} | FGI: {fgi_value} | 涨跌: {change_pct}%")
+    print(f"👉 AHR999: {ahr999:.4f} | Pi底: {pi_bottom_ratio:.4f} | Pi顶率: {pi_ratio:.4f} | FGI: {fgi_value} | 涨跌: {change_pct}%")
 
     # ================= 底部穿越通知（边缘触发，每条仅发一次）=================
     crossings = check_crossing(last_ahr999, ahr999)
     for key, title, html, summary in crossings:
         send_wxpusher(title, html, summary)
         print(f"穿越通知发送: {key}")
+
+    # ================= Pi Cycle Bottom 穿越检测 =================
+    if last_pi_bottom is not None and last_pi_bottom > PI_BOTTOM_THRESHOLD and pi_bottom_ratio <= PI_BOTTOM_THRESHOLD:
+        title = "🔵 Pi Cycle Bottom 底部信号触发"
+        html = f"""<h2>🔵 Pi Cycle Bottom 底部信号触发</h2>
+        <p><b>当前 Pi Bottom 比率:</b> <span style="color:#0066cc; font-size:24px; font-weight:bold;">{pi_bottom_ratio:.4f}</span></p>
+        <p><b>说明：</b>150 EMA 已跌破 471 SMA × 0.745（比率 ≤ 1.0），历史上对应 BTC 周期底部区域，可关注分批买入机会。</p>
+        <hr>
+        <ul>
+            <li><b>BTC 价格:</b> $ {current_price:.2f}</li>
+            <li><b>AHR999:</b> {ahr999:.4f}</li>
+            <li><b>Pi 顶率:</b> {pi_ratio:.4f}</li>
+            <li><b>恐惧贪婪:</b> {fgi_value} ({fgi_class})</li>
+        </ul>"""
+        send_wxpusher(title, html, f"Pi Bottom 底部信号: {pi_bottom_ratio:.4f}")
+        print(f"Pi Bottom 穿越通知发送: {pi_bottom_ratio:.4f}")
+
+    # ================= 每周日数据汇总推送 =================
+    if datetime.date.today().weekday() == 6:
+        title = "📋 每周 BTC 指标数据汇总"
+        html = f"""<h2>📋 每周 BTC 指标数据汇总</h2>
+        <p><b>BTC 价格:</b> $ {current_price:.2f}</p>
+        <hr>
+        <ul>
+            <li><b>AHR999:</b> {ahr999:.4f}（{'🟢 低估' if ahr999 < AHR999_BOTTOM else '🟡 定投区' if ahr999 < AHR999_WARN else '🔴 高估'}）</li>
+            <li><b>Pi Cycle Bottom:</b> {pi_bottom_ratio:.4f}（{'⚠️ 底部信号已触发' if pi_bottom_ratio <= PI_BOTTOM_THRESHOLD else '正常'}）</li>
+            <li><b>Pi Cycle Top:</b> {pi_ratio:.4f}（{'⚠️ 逃顶临近' if pi_ratio >= 1.0 else '安全'}）</li>
+            <li><b>恐惧贪婪指数:</b> {fgi_value}（{fgi_class}）</li>
+            <li><b>24h 涨跌幅:</b> {change_pct}%</li>
+        </ul>
+        <hr>
+        <p><i>每周日自动推送，数据仅供参考，不构成投资建议。</i></p>"""
+        send_wxpusher(title, html, f"周报: AHR999={ahr999:.4f} | Pi底={pi_bottom_ratio:.4f} | FGI={fgi_value}")
+        print("周日数据汇总已推送。")
 
     # ================= 卖出/逃顶逻辑 (最高优先级) =================
 
@@ -188,7 +239,7 @@ if __name__ == "__main__":
         """
         send_wxpusher(title, html, "☢️ 紧急逃顶指令触发！")
         print("核按钮触发！已发送通知。")
-        save_state({"last_ahr999": ahr999})
+        save_state({"last_ahr999": ahr999, "last_pi_bottom": pi_bottom_ratio})
         exit() # 只要逃顶触发了，就不再向下判断任何抄底逻辑
 
     elif ahr999 > AHR999_WARN:
@@ -220,4 +271,4 @@ if __name__ == "__main__":
         print("市场在 0.45 ~ 1.2 之间震荡，未暴跌，保持静默死守。")
 
     # 保存本次状态
-    save_state({"last_ahr999": ahr999})
+    save_state({"last_ahr999": ahr999, "last_pi_bottom": pi_bottom_ratio})
